@@ -51,15 +51,15 @@ lidar = data['lidar']
 # Let's plot the ground truth trajectory to see what it looks like. When you're testing your
 # code later, feel free to comment this out.
 ################################################################################################
-gt_fig = plt.figure()
-ax = gt_fig.add_subplot(111, projection='3d')
-ax.plot(gt.p[:,0], gt.p[:,1], gt.p[:,2])
-ax.set_xlabel('x [m]')
-ax.set_ylabel('y [m]')
-ax.set_zlabel('z [m]')
-ax.set_title('Ground Truth trajectory')
-ax.set_zlim(-1, 5)
-plt.show()
+# gt_fig = plt.figure()
+# ax = gt_fig.add_subplot(111, projection='3d')
+# ax.plot(gt.p[:,0], gt.p[:,1], gt.p[:,2])
+# ax.set_xlabel('x [m]')
+# ax.set_ylabel('y [m]')
+# ax.set_zlabel('z [m]')
+# ax.set_title('Ground Truth trajectory')
+# ax.set_zlim(-1, 5)
+# plt.show()
 
 ################################################################################################
 # Remember that our LIDAR data is actually just a set of positions estimated from a separate
@@ -135,15 +135,26 @@ lidar_i = 0
 # a function for it.
 ################################################################################################
 def measurement_update(sensor_var, p_cov_check, y_k, p_check, v_check, q_check):
+    Rk = np.identity(3) * sensor_var
+
     # 3.1 Compute Kalman Gain
+    Kk = p_cov_check @ h_jac.T @ np.linalg.inv(h_jac @ p_cov_check @ h_jac.T + Rk)
 
     # 3.2 Compute error state
+    error = Kk @ (y_k - p_check)
+    error = np.squeeze(np.asarray(error))
 
     # 3.3 Correct predicted state
+    p_hat = p_check + error[:3]
+    v_hat = v_check + error[3:6]
+    q_hat = Quaternion(euler=q_check).quat_mult_left(Quaternion(euler=angle_normalize(error[6:])), out='Quaternion').to_euler()
+    # q_hat = q_check
 
     # 3.4 Compute corrected covariance
+    p_cov_hat = (np.identity(9) - Kk @ h_jac) @ p_cov_check
 
     return p_hat, v_hat, q_hat, p_cov_hat
+    # return p_check, v_check, q_check, p_cov_check
 
 #### 5. Main Filter Loop #######################################################################
 
@@ -155,14 +166,52 @@ for k in range(1, imu_f.data.shape[0]):  # start at 1 b/c we have initial predic
     delta_t = imu_f.t[k] - imu_f.t[k - 1]
 
     # 1. Update state with IMU inputs
+    p_last = p_est[k-1]
+    v_last = v_est[k-1]
+    q_last = Quaternion(*q_est[k-1]).to_euler()
+    p_cov_last = p_cov[k-1]
+
+    C_ns = Quaternion(euler=q_last).to_mat()
+    acceleration = C_ns @ imu_f.data[k-1] + g
+    v_check = v_last + (acceleration * delta_t)
+    p_check = p_last + (v_last * delta_t) + (0.5 * acceleration * delta_t**2)
+    q_check_temp = Quaternion(euler=q_last).quat_mult_left(Quaternion(euler=angle_normalize(imu_w.data[k-1] * delta_t)))
+    q_check = Quaternion(*q_check_temp).to_euler()
 
     # 1.1 Linearize the motion model and compute Jacobians
+    Fk = np.identity(9)
+    Fk[0:3, 3:6] = np.identity(3) * delta_t
+    # Fk[3:6, 6:9] = -C_ns @ imu_f.data[k-1] * delta_t
+    Fk[3:6, 6:9] = -(C_ns @ skew_symmetric(imu_f.data[k-1].reshape((3,1)))) * delta_t
+    # Fk = np.asmatrix(Fk)
+
+    Qk = np.diag([var_imu_f, var_imu_f, var_imu_f, var_imu_w, var_imu_w, var_imu_w]) * (delta_t**2)
+    # Qk = np.asmatrix(Qk)
 
     # 2. Propagate uncertainty
+    p_cov_check = Fk @ np.asmatrix(p_cov_last) @ Fk.T + l_jac @ Qk @ l_jac.T
 
     # 3. Check availability of GNSS and LIDAR measurements
+    timestamp = imu_f.t[k-1]
+    try:
+        i = np.where(gnss.t == timestamp)[0][0]
+        gnss_i = gnss.data[i]
+        p_check, v_check, q_check, p_cov_check = measurement_update(var_gnss, p_cov_check, gnss_i, p_check, v_check, q_check)
+    except IndexError:
+        pass
+    
+    try:
+        i = np.where(lidar.t == timestamp)[0][0]
+        lidar_i = lidar.data[i]
+        p_check, v_check, q_check, p_cov_check = measurement_update(var_lidar, p_cov_check, lidar_i, p_check, v_check, q_check)
+    except IndexError:
+        pass    
 
     # Update states (save)
+    p_est[k] = p_check
+    v_est[k] = v_check
+    q_est[k] = Quaternion(euler=q_check).to_numpy()
+    p_cov[k] = p_cov_check
 
 #### 6. Results and Analysis ###################################################################
 
@@ -187,8 +236,8 @@ ax.set_xticks([0, 50, 100, 150, 200])
 ax.set_yticks([0, 50, 100, 150, 200])
 ax.set_zticks([-2, -1, 0, 1, 2])
 ax.legend(loc=(0.62,0.77))
-ax.view_init(elev=45, azim=-50)
-plt.show()
+ax.view_init(elev=90, azim=-90)
+# plt.show()
 
 ################################################################################################
 # We can also plot the error for each of the 6 DOF, with estimates for our uncertainty
